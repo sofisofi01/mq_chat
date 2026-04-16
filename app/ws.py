@@ -32,3 +32,35 @@ class WSManager:
 
 
 manager = WSManager()
+
+class SignalingManager:
+    """Отдельные WebSocket только для JSON WebRTC (не смешивать с HTML чата)."""
+
+    def __init__(self) -> None:
+        self.rooms: dict[str, set[WebSocket]] = defaultdict(set)
+
+    async def connect(self, room_id: str, ws: WebSocket) -> None:
+        await ws.accept()
+        self.rooms[room_id].add(ws)
+
+    def disconnect(self, room_id: str, ws: WebSocket) -> None:
+        if room_id in self.rooms and ws in self.rooms[room_id]:
+            self.rooms[room_id].remove(ws)
+            if not self.rooms[room_id]:
+                del self.rooms[room_id]
+
+    async def relay(self, room_id: str, sender: WebSocket, text: str) -> None:
+        """Переслать сырую строку всем другим сокетам в комнате (1:1 — одному пиру)."""
+        dead: list[WebSocket] = []
+        for peer in self.rooms.get(room_id, set()):
+            if peer is sender:
+                continue
+            try:
+                await peer.send_text(text)
+            except Exception:
+                dead.append(peer)
+        for w in dead:
+            self.disconnect(room_id, w)
+
+
+signal_manager = SignalingManager()

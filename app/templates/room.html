@@ -1,9 +1,25 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Комната: {{ room_id }}</h1>
-
+  <div id="webrtc-panel" class="webrtc-panel">
+    <h2>Видео 1:1</h2>
+    <p class="webrtc-hint">Откройте эту же комнату во <strong>второй вкладке</strong>, разные ники. Нажмите «Позвонить» в одной вкладке.</p>
+    <div class="webrtc-videos">
+      <div>
+        <span>Вы</span>
+        <video id="localVideo" autoplay playsinline muted></video>
+      </div>
+      <div>
+        <span>Собеседник</span>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+    </div>
+    <button type="button" id="btn-call">Позвонить</button>
+    <button type="button" id="btn-hangup">Завершить</button>
+  </div>
 <section id="chat-root" hx-ext="ws" ws-connect="/ws/{{ room_id }}">
   <div id="messages" class="messages"></div>
+  <div id="read-receipts" class="read-receipts"></div>
 
   <form id="message-form" class="message-form" ws-send>
     <input type="text" name="username" placeholder="Ваш ник" required />
@@ -61,6 +77,163 @@
       if (btn100) btn100.disabled = false;
       if (btn1000) btn1000.disabled = false;
     }
+    const EMOJIS = ['👍', '❤️', '😂', '😮', '😢'];
+
+    function getUsername() {
+      return document.querySelector('input[name="username"]')?.value.trim() || '';
+    }
+
+    async function toggleReaction(roomId, messageId, emoji) {
+      const username = getUsername();
+      if (!username) { alert('Введите ник, чтобы поставить реакцию'); return; }
+
+      // Есть «активная» кнопка в блоке реакций — шлём DELETE (см. также п. 6.1).
+      const btn = document.querySelector(
+        `#reactions-${messageId} [data-emoji="${emoji}"][data-active="1"]`
+      );
+      const method = btn ? 'DELETE' : 'POST';
+      const fd = new FormData();
+      fd.append('username', username);
+      fd.append('emoji', emoji);
+      await fetch(`/rooms/${roomId}/messages/${messageId}/reactions`, { method, body: fd });
+      // Итоговый UI придёт по WebSocket из consume_reaction_events (oob innerHTML).
+    }
+
+    let _readTimer = null;
+    // Запоминаем последний «увиденный» id статьи, чтобы не дергать /read на каждый мелкий патч DOM.
+    let _lastSeenMsgId = 0;
+
+    function scheduleReadReceipt() {
+      clearTimeout(_readTimer);
+      _readTimer = setTimeout(doSendReadReceipt, 800);  // debounce
+    }
+
+    function doSendReadReceipt() {
+      const username = getUsername();
+      if (!username) return;
+
+      const msgs = document.querySelectorAll('article.msg[id^="msg-"]');
+      if (!msgs.length) return;
+      const lastId = parseInt([...msgs].at(-1).id.replace('msg-', ''), 10);
+      if (!lastId) return;
+
+      const fd = new FormData();
+      fd.append('username', username);
+      fd.append('message_id', lastId);
+      fetch('/rooms/{{ room_id }}/read', { method: 'POST', body: fd });
+    }
+
+    document.addEventListener('htmx:wsAfterMessage', () => {
+      // Новые message-карточки обогащаем пикером (по одному разу на article).
+      document.querySelectorAll('.msg:not([data-emoji-added])').forEach((article) => {
+        const msgId = article.id?.replace('msg-', '');
+        if (!msgId) return;
+        const roomId = '{{ room_id }}';
+        const picker = document.createElement('div');
+        picker.className = 'emoji-picker';
+        EMOJIS.forEach((e) => {
+          const btn = document.createElement('button');
+          btn.className = 'emoji-btn';
+          btn.dataset.emoji = e;
+          btn.dataset.active = '0';
+          btn.textContent = e;
+          btn.onclick = () => toggleReaction(roomId, msgId, e);
+          picker.appendChild(btn);
+        });
+        const reactDiv = article.querySelector(`#reactions-${msgId}`);
+        if (reactDiv) article.insertBefore(picker, reactDiv);
+        article.dataset.emojiAdded = '1';
+      });
+
+      const list = document.querySelectorAll('article.msg[id^="msg-"]');
+      if (!list.length) return;
+      const maxId = Math.max(
+        ...[...list].map((el) => parseInt(el.id.replace('msg-', ''), 10) || 0),
+      );
+      if (maxId > _lastSeenMsgId) {
+        _lastSeenMsgId = maxId;
+        scheduleReadReceipt();
+      }
+    });
+
+    document.querySelector('input[name="username"]').addEventListener('input', () => {
+      scheduleReadReceipt();
+    });
+
+   const ROOM_ID = '{{ room_id }}';
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const signalWs = new WebSocket(`${wsProto}//${location.host}/ws/signal/${ROOM_ID}`);
+
+    const ICE_SERVERS = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    let pc = null;
+    let localStream = null;
+
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const btnCall = document.getElementById('btn-call');
+    const btnHangup = document.getElementById('btn-hangup');
+
+    function sendSignal(obj) {
+      if (signalWs.readyState === WebSocket.OPEN) signalWs.send(JSON.stringify(obj));
+    }
+
+    signalWs.onmessage = async (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === 'offer') {
+        await ensurePc();
+        await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: msg.sdp }));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        sendSignal({ type: 'answer', sdp: answer.sdp });
+      } else if (msg.type === 'answer') {
+        if (pc && !pc.currentRemoteDescription) {
+          await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
+        }
+      } else if (msg.type === 'ice' && msg.candidate && pc) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        } catch (e) { console.warn('ICE', e); }
+      }
+    };
+
+    async function ensurePc() {
+      if (pc) return pc;
+      pc = new RTCPeerConnection(ICE_SERVERS);
+      pc.ontrack = (e) => { remoteVideo.srcObject = e.streams[0]; };
+      pc.onicecandidate = (e) => {
+        if (e.candidate) sendSignal({ type: 'ice', candidate: e.candidate.toJSON() });
+      };
+      if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+      return pc;
+    }
+
+    function cleanupPeer() {
+      if (pc) { pc.close(); pc = null; }
+      remoteVideo.srcObject = null;
+    }
+
+    btnCall.onclick = async () => {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+        await ensurePc();
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendSignal({ type: 'offer', sdp: offer.sdp });
+      } catch (e) {
+        alert('Нет доступа к камере/микрофону или WebRTC: ' + e);
+      }
+    };
+
+    btnHangup.onclick = () => {
+      cleanupPeer();
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+        localStream = null;
+        localVideo.srcObject = null;
+      }
+    };
   </script>
 </section>
 {% endblock %}

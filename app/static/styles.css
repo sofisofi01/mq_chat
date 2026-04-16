@@ -42,3 +42,64 @@ body {
   gap: 8px;
   margin-bottom: 12px;
 }
+
+/* Контейнер галочки в шапке сообщения (flex: прижать вправо через margin-left: auto). */
+.msg-status {
+  font-size: 13px;
+  color: #aaa;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Серая одна галочка — «доставлено в чат» */
+.msg-status::before {
+  content: '✓';
+}
+
+.msg-status.read {
+  color: #4fc3f7;
+}
+
+/* Две галочки — «кто-то другой прочитал» (см. mark_read) */
+.msg-status.read::before {
+  content: '✓✓';
+}
+
+.emoji-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0;
+}
+
+.emoji-btn {
+  border: 1px solid #ddd;
+  background: #fafafa;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.webrtc-panel {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+.webrtc-videos {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.webrtc-videos video {
+  width: 240px;
+  max-width: 100%;
+  background: #111;
+  border-radius: 6px;
+}
+.webrtc-hint {
+  font-size: 14px;
+  color: #555;
+}
