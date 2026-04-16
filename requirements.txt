@@ -6,3 +6,4 @@ httpx
 sqlalchemy
 asyncpg
 aio_pika
+python-multipart
